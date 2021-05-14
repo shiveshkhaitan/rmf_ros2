@@ -47,6 +47,8 @@
 
 #include <rmf_traffic_msgs/msg/schedule_inconsistency.hpp>
 
+#include <rmf_traffic_msgs/msg/heartbeat.hpp>
+
 #include <rmf_traffic_msgs/srv/register_query.hpp>
 #include <rmf_traffic_msgs/srv/unregister_query.hpp>
 #include <rmf_traffic_msgs/srv/register_participant.hpp>
@@ -58,6 +60,7 @@
 
 #include <rmf_utils/Modular.hpp>
 
+#include <chrono>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -65,6 +68,8 @@
 
 namespace rmf_traffic_ros2 {
 namespace schedule {
+
+using namespace std::chrono_literals;
 
 //==============================================================================
 class ScheduleNode : public rclcpp::Node
@@ -74,6 +79,27 @@ public:
   ScheduleNode(const rclcpp::NodeOptions& options);
 
   ~ScheduleNode();
+
+  bool is_active = true;
+  std::chrono::milliseconds heartbeat_period = 1s;
+  rclcpp::QoS heartbeat_qos_profile;
+  rclcpp::SubscriptionOptions heartbeat_sub_options;
+  using Heartbeat = rmf_traffic_msgs::msg::Heartbeat;
+  using HeartbeatSub = rclcpp::Subscription<Heartbeat>;
+  HeartbeatSub::SharedPtr heartbeat_sub;
+  using HeartbeatPub = rclcpp::Publisher<Heartbeat>;
+  HeartbeatPub::SharedPtr heartbeat_pub;
+  rclcpp::TimerBase::SharedPtr heartbeat_pub_timer;
+
+  void init_inactive();
+  void init_active();
+  void switch_to_active();
+  void start_heartbeat_listener();
+  void stop_heartbeat_listener();
+  void start_heartbeat_broadcaster();
+  void stop_heartbeat_broadcaster();
+  void fork_database();
+  void start_services();
 
   using request_id_ptr = std::shared_ptr<rmw_request_id_t>;
 
@@ -422,7 +448,6 @@ public:
   // description versions separately from itinerary versions.
   std::size_t last_known_participants_version = 0;
   std::size_t current_participants_version = 1;
-
 };
 
 } // namespace schedule

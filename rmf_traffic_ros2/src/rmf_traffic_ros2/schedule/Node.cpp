@@ -86,8 +86,145 @@ std::vector<ScheduleNode::ConflictSet> get_conflicts(
 //==============================================================================
 ScheduleNode::ScheduleNode(const rclcpp::NodeOptions& options)
 : Node("rmf_traffic_schedule_node", options),
+  heartbeat_qos_profile(1),
   database(std::make_shared<rmf_traffic::schedule::Database>()),
   active_conflicts(database)
+{
+  // Track whether this is the active node in the redundant pair or not
+  declare_parameter<bool>("is_active", true);
+  get_parameter<bool>("is_active", is_active);
+  // Period, in milliseconds, for sending out a heartbeat signal to the inactive
+  // node in the redundant pair
+  declare_parameter<int>("heartbeat_period", 1000);
+  // Set up a heartbeat publisher or subscriber, depending on if this is the
+  // active node or not
+  if (is_active)
+  {
+    init_active();
+  }
+  else
+  {
+    init_inactive();
+  }
+}
+
+//==============================================================================
+ScheduleNode::~ScheduleNode()
+{
+  conflict_check_quit = true;
+  if (conflict_check_thread.joinable())
+    conflict_check_thread.join();
+}
+
+//==============================================================================
+void ScheduleNode::init_active()
+{
+  RCLCPP_WARN(get_logger(), "Active schedule node: Starting");
+  start_heartbeat_broadcaster();
+  start_services();
+}
+
+//==============================================================================
+void ScheduleNode::init_inactive()
+{
+  RCLCPP_WARN(get_logger(), "Inactive schedule node: Starting");
+  start_heartbeat_listener();
+}
+
+//==============================================================================
+void ScheduleNode::switch_to_active()
+{
+  RCLCPP_WARN(
+    get_logger(),
+    "Inactive schedule node: Switching to active");
+  stop_heartbeat_listener();
+  fork_database();
+  start_services();
+}
+
+//==============================================================================
+void ScheduleNode::start_heartbeat_listener()
+{
+  heartbeat_qos_profile
+    .liveliness(RMW_QOS_POLICY_LIVELINESS_MANUAL_BY_TOPIC)
+    .liveliness_lease_duration(heartbeat_period);
+  heartbeat_sub_options.event_callbacks.liveliness_callback =
+    [this](rclcpp::QOSLivelinessChangedInfo &event) -> void {
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node: Reader liveliness changed event:");
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node:   alive_count: %d",
+        event.alive_count);
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node:   not_alive_count: %d",
+        event.not_alive_count);
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node:   alive_count_change: %d",
+        event.alive_count_change);
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node:   not_alive_count_change: %d",
+        event.not_alive_count_change);
+      if(event.alive_count == 0) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Inactive schedule node: Detected death of active schedule node");
+        switch_to_active();
+      }
+    };
+  heartbeat_sub = create_subscription<Heartbeat>(
+    "internal/heartbeat",
+    heartbeat_qos_profile,
+    [this](const typename Heartbeat::SharedPtr msg) -> void {
+      RCLCPP_WARN(
+        get_logger(),
+        "Inactive schedule node: Received heartbeat from active schedule node");
+    },
+    heartbeat_sub_options);
+}
+
+//==============================================================================
+void ScheduleNode::stop_heartbeat_listener()
+{
+}
+
+//==============================================================================
+void ScheduleNode::start_heartbeat_broadcaster()
+{
+  heartbeat_period = std::chrono::milliseconds(
+    get_parameter("heartbeat_period").as_int());
+  heartbeat_qos_profile
+    .liveliness(RMW_QOS_POLICY_LIVELINESS_MANUAL_BY_TOPIC)
+    .liveliness_lease_duration(heartbeat_period)
+    .deadline(heartbeat_period);
+  heartbeat_pub = create_publisher<Heartbeat>(
+    "internal/heartbeat",
+    heartbeat_qos_profile);
+  heartbeat_pub_timer = create_wall_timer(
+    heartbeat_period,
+    [this]() -> void {
+      RCLCPP_WARN(get_logger(), "Active schedule node: Publishing heartbeat");
+      auto message = rmf_traffic_msgs::msg::Heartbeat();
+      heartbeat_pub->publish(message);
+    });
+}
+
+//==============================================================================
+void ScheduleNode::stop_heartbeat_broadcaster()
+{
+}
+
+//==============================================================================
+void ScheduleNode::fork_database()
+{
+}
+
+//==============================================================================
+void ScheduleNode::start_services()
 {
   //Attempt to load/create participant registry.
   declare_parameter<std::string>("log_file_location", ".rmf_schedule_node.yaml");
@@ -347,14 +484,6 @@ ScheduleNode::ScheduleNode(const rclcpp::NodeOptions& options)
         }
       }
     });
-}
-
-//==============================================================================
-ScheduleNode::~ScheduleNode()
-{
-  conflict_check_quit = true;
-  if (conflict_check_thread.joinable())
-    conflict_check_thread.join();
 }
 
 //==============================================================================
