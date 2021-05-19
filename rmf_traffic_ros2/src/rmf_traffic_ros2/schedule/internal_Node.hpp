@@ -21,6 +21,7 @@
 #include "NegotiationRoom.hpp"
 
 #include <rmf_traffic/schedule/Database.hpp>
+#include <rmf_traffic/schedule/Mirror.hpp>
 #include <rmf_traffic/schedule/Negotiation.hpp>
 
 #include <rclcpp/node.hpp>
@@ -48,14 +49,18 @@
 #include <rmf_traffic_msgs/msg/schedule_inconsistency.hpp>
 
 #include <rmf_traffic_msgs/msg/heartbeat.hpp>
+#include <rmf_traffic_msgs/msg/fail_over_event.hpp>
 
 #include <rmf_traffic_msgs/srv/register_query.hpp>
 #include <rmf_traffic_msgs/srv/unregister_query.hpp>
 #include <rmf_traffic_msgs/srv/register_participant.hpp>
 #include <rmf_traffic_msgs/srv/unregister_participant.hpp>
 
+#include <rmf_traffic_msgs/srv/test_reconnect.hpp>
+
 #include <rmf_traffic_msgs/msg/negotiation_notice.hpp>
 
+#include <rmf_traffic_ros2/schedule/MirrorManager.hpp>
 #include <rmf_traffic_ros2/schedule/ParticipantRegistry.hpp>
 
 #include <rmf_utils/Modular.hpp>
@@ -80,7 +85,10 @@ public:
 
   ~ScheduleNode();
 
-  bool is_active = true;
+  bool is_primary = true;
+  std::string primary_namespace;
+  std::string node_type_str;
+
   std::chrono::milliseconds heartbeat_period = 1s;
   rclcpp::QoS heartbeat_qos_profile;
   rclcpp::SubscriptionOptions heartbeat_sub_options;
@@ -91,15 +99,37 @@ public:
   HeartbeatPub::SharedPtr heartbeat_pub;
   rclcpp::TimerBase::SharedPtr heartbeat_pub_timer;
 
-  void init_inactive();
-  void init_active();
-  void switch_to_active();
+  using FailOverEvent = rmf_traffic_msgs::msg::FailOverEvent;
+  using FailOverEventPub = rclcpp::Publisher<FailOverEvent>;
+  FailOverEventPub::SharedPtr fail_over_event_pub;
+
+  // This mirror is used by the backup node to receive updates from the
+  // primary node. When a fail-over event occurs, it will be forked into a full
+  // database.
+  // The primary node will leave this empty.
+  std::optional<rmf_traffic_ros2::schedule::MirrorManager> mirror;
+
+  void init_backup_node();
+  void init_primary_node();
+  void switch_to_primary();
+
   void start_heartbeat_listener();
   void stop_heartbeat_listener();
-  void start_heartbeat_broadcaster();
-  void stop_heartbeat_broadcaster();
-  void fork_database();
+  void start_heartbeat();
+  void stop_heartbeat();
+
+  void start_fail_over_event_broadcaster();
+  void stop_fail_over_event_broadcaster();
+  void announce_fail_over();
+
+  void start_mirror();
+  void fork_mirror_to_databases();
+  void start_databases();
   void start_services();
+
+  using TestReconnect = rmf_traffic_msgs::srv::TestReconnect;
+  using TestReconnectService = rclcpp::Service<TestReconnect>;
+  TestReconnectService::SharedPtr test_reconnect_service;
 
   using request_id_ptr = std::shared_ptr<rmw_request_id_t>;
 
@@ -440,7 +470,7 @@ public:
     Version _next_negotiation_version = 0;
   };
 
-  ConflictRecord active_conflicts;
+  std::shared_ptr<ConflictRecord> active_conflicts;
   std::mutex active_conflicts_mutex;
   std::shared_ptr<ParticipantRegistry> participant_registry;
 

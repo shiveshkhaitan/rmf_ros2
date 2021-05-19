@@ -23,17 +23,19 @@
 #include <rmf_traffic_ros2/StandardNames.hpp>
 #include <rmf_traffic_ros2/Time.hpp>
 #include <rmf_traffic_ros2/Trajectory.hpp>
+#include <rmf_traffic_ros2/schedule/Inconsistencies.hpp>
 #include <rmf_traffic_ros2/schedule/Itinerary.hpp>
 #include <rmf_traffic_ros2/schedule/Query.hpp>
+#include <rmf_traffic_ros2/schedule/ParticipantDescription.hpp>
 #include <rmf_traffic_ros2/schedule/Patch.hpp>
 #include <rmf_traffic_ros2/schedule/Writer.hpp>
-#include <rmf_traffic_ros2/schedule/ParticipantDescription.hpp>
-#include <rmf_traffic_ros2/schedule/Inconsistencies.hpp>
 
 #include <rmf_traffic/DetectConflict.hpp>
 #include <rmf_traffic/schedule/Mirror.hpp>
 
 #include <rmf_utils/optional.hpp>
+
+#include <rclcpp/executors.hpp>
 
 #include <unordered_map>
 
@@ -86,25 +88,29 @@ std::vector<ScheduleNode::ConflictSet> get_conflicts(
 //==============================================================================
 ScheduleNode::ScheduleNode(const rclcpp::NodeOptions& options)
 : Node("rmf_traffic_schedule_node", options),
-  heartbeat_qos_profile(1),
-  database(std::make_shared<rmf_traffic::schedule::Database>()),
-  active_conflicts(database)
+  heartbeat_qos_profile(1)
 {
-  // Track whether this is the active node in the redundant pair or not
-  declare_parameter<bool>("is_active", true);
-  get_parameter<bool>("is_active", is_active);
-  // Period, in milliseconds, for sending out a heartbeat signal to the inactive
+  // Track whether this is the primary node in the redundant pair or not
+  declare_parameter<bool>("is_primary", true);
+  get_parameter<bool>("is_primary", is_primary);
+  // Receive the name of the primary node for finding topics in its namespace
+  declare_parameter<std::string>("primary_namespace", "rmf_traffic");
+  get_parameter<std::string>("primary_namespace", primary_namespace);
+  // Period, in milliseconds, for sending out a heartbeat signal to the backup
   // node in the redundant pair
   declare_parameter<int>("heartbeat_period", 1000);
-  // Set up a heartbeat publisher or subscriber, depending on if this is the
-  // active node or not
-  if (is_active)
+  heartbeat_period = std::chrono::milliseconds(
+    get_parameter("heartbeat_period").as_int());
+  // Location where the participant registry should be stored
+  declare_parameter<std::string>("log_file_location", ".rmf_schedule_node.yaml");
+
+  if (is_primary)
   {
-    init_active();
+    init_primary_node();
   }
   else
   {
-    init_inactive();
+    init_backup_node();
   }
 }
 
@@ -117,117 +123,203 @@ ScheduleNode::~ScheduleNode()
 }
 
 //==============================================================================
-void ScheduleNode::init_active()
+void ScheduleNode::init_primary_node()
 {
-  RCLCPP_WARN(get_logger(), "Active schedule node: Starting");
-  start_heartbeat_broadcaster();
+  node_type_str = "Schedule node primary: ";
+  RCLCPP_WARN(get_logger(), node_type_str + "Starting");
+  start_heartbeat();
+  start_databases();
   start_services();
 }
 
 //==============================================================================
-void ScheduleNode::init_inactive()
+void ScheduleNode::init_backup_node()
 {
-  RCLCPP_WARN(get_logger(), "Inactive schedule node: Starting");
+  node_type_str = "Schedule node backup: ";
+  RCLCPP_WARN(get_logger(), node_type_str + "Starting");
   start_heartbeat_listener();
+  start_fail_over_event_broadcaster();
+  start_mirror();
 }
 
 //==============================================================================
-void ScheduleNode::switch_to_active()
+void ScheduleNode::switch_to_primary()
 {
   RCLCPP_WARN(
     get_logger(),
-    "Inactive schedule node: Switching to active");
+    node_type_str + "Switching to primary");
   stop_heartbeat_listener();
-  fork_database();
+  fork_mirror_to_databases();
   start_services();
+  announce_fail_over();
+  node_type_str = "Schedule node primary_new: ";
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str + "Switch to primary complete");
 }
 
 //==============================================================================
 void ScheduleNode::start_heartbeat_listener()
 {
   heartbeat_qos_profile
-    .liveliness(RMW_QOS_POLICY_LIVELINESS_MANUAL_BY_TOPIC)
+    .liveliness(RMW_QOS_POLICY_LIVELINESS_AUTOMATIC)
     .liveliness_lease_duration(heartbeat_period);
   heartbeat_sub_options.event_callbacks.liveliness_callback =
     [this](rclcpp::QOSLivelinessChangedInfo &event) -> void {
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node: Reader liveliness changed event:");
+        node_type_str + "Liveliness changed event:");
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node:   alive_count: %d",
+        node_type_str + "  alive_count: %d",
         event.alive_count);
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node:   not_alive_count: %d",
+        node_type_str + "  not_alive_count: %d",
         event.not_alive_count);
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node:   alive_count_change: %d",
+        node_type_str + "  alive_count_change: %d",
         event.alive_count_change);
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node:   not_alive_count_change: %d",
+        node_type_str + "  not_alive_count_change: %d",
         event.not_alive_count_change);
       if(event.alive_count == 0) {
         RCLCPP_WARN(
           get_logger(),
-          "Inactive schedule node: Detected death of active schedule node");
-        switch_to_active();
+          node_type_str + "Detected death of primary schedule node");
+        switch_to_primary();
       }
     };
   heartbeat_sub = create_subscription<Heartbeat>(
-    "internal/heartbeat",
+    primary_namespace + "/internal/heartbeat",
     heartbeat_qos_profile,
     [this](const typename Heartbeat::SharedPtr msg) -> void {
+      (void) msg;
       RCLCPP_WARN(
         get_logger(),
-        "Inactive schedule node: Received heartbeat from active schedule node");
+        node_type_str + "Received heartbeat from primary schedule node");
     },
     heartbeat_sub_options);
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str +
+      "Set up heartbeat listener on %s with liveliness lease duration of %d ms",
+    heartbeat_sub->get_topic_name(),
+    heartbeat_period);
 }
 
 //==============================================================================
 void ScheduleNode::stop_heartbeat_listener()
 {
+  heartbeat_sub.reset();
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str + "Stopped heartbeat listener");
 }
 
 //==============================================================================
-void ScheduleNode::start_heartbeat_broadcaster()
+void ScheduleNode::start_heartbeat()
 {
-  heartbeat_period = std::chrono::milliseconds(
-    get_parameter("heartbeat_period").as_int());
+  // Set up liveliness announcements of this node, powered by DDS[tm][r][c][rgb]
   heartbeat_qos_profile
-    .liveliness(RMW_QOS_POLICY_LIVELINESS_MANUAL_BY_TOPIC)
+    .liveliness(RMW_QOS_POLICY_LIVELINESS_AUTOMATIC)
     .liveliness_lease_duration(heartbeat_period)
     .deadline(heartbeat_period);
   heartbeat_pub = create_publisher<Heartbeat>(
-    "internal/heartbeat",
+    "~/internal/heartbeat",
     heartbeat_qos_profile);
-  heartbeat_pub_timer = create_wall_timer(
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str +
+      "Set up heartbeat on %s with liveliness lease duration of %d ms "
+      "and deadline of %d ms",
+    heartbeat_pub->get_topic_name(),
     heartbeat_period,
-    [this]() -> void {
-      RCLCPP_WARN(get_logger(), "Active schedule node: Publishing heartbeat");
-      auto message = rmf_traffic_msgs::msg::Heartbeat();
-      heartbeat_pub->publish(message);
-    });
+    heartbeat_period);
 }
 
 //==============================================================================
-void ScheduleNode::stop_heartbeat_broadcaster()
+void ScheduleNode::stop_heartbeat()
+{
+  heartbeat_pub.reset();
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str + "Stopped heartbeat");
+}
+
+//==============================================================================
+void ScheduleNode::start_fail_over_event_broadcaster()
+{
+  fail_over_event_pub = create_publisher<FailOverEvent>(
+    rmf_traffic_ros2::FailOverEventTopicName,
+    rclcpp::ServicesQoS().reliable());
+}
+
+//==============================================================================
+void ScheduleNode::stop_fail_over_event_broadcaster()
+{
+  fail_over_event_pub.reset();
+}
+
+//==============================================================================
+void ScheduleNode::announce_fail_over()
+{
+  RCLCPP_WARN(get_logger(), node_type_str + "Announcing fail over");
+  auto message = FailOverEvent();
+  fail_over_event_pub->publish(message);
+}
+
+//==============================================================================
+void ScheduleNode::start_mirror()
+{
+  RCLCPP_WARN(get_logger(), node_type_str + "Starting database mirror");
+  auto mirror_future = rmf_traffic_ros2::schedule::make_mirror(
+    *this,
+    rmf_traffic::schedule::query_all());
+
+  using namespace std::chrono_literals;
+
+  RCLCPP_WARN(get_logger(), node_type_str + "Starting mirror wait");
+  const auto stop_time = std::chrono::steady_clock::now() + 10s;
+  while (rclcpp::ok() && std::chrono::steady_clock::now() < stop_time)
+  {
+    RCLCPP_WARN(get_logger(), node_type_str + "Spin");
+    rclcpp::spin_some(std::shared_ptr<ScheduleNode>(this));
+
+    RCLCPP_WARN(get_logger(), node_type_str + "Check");
+    if (mirror_future.wait_for(0s) == std::future_status::ready)
+    {
+      mirror = mirror_future.get();
+      RCLCPP_WARN(get_logger(), node_type_str + "Got mirror");
+      return;
+    }
+    RCLCPP_WARN(get_logger(), node_type_str + "Not this time");
+  }
+  RCLCPP_WARN(get_logger(), node_type_str + "Failed to start database mirror");
+  // TODO(Geoff): Need to report this error somehow. Throw an exception here?
+}
+
+//==============================================================================
+void ScheduleNode::fork_mirror_to_databases()
 {
 }
 
 //==============================================================================
-void ScheduleNode::fork_database()
+void ScheduleNode::start_databases()
 {
+  database = std::make_shared<rmf_traffic::schedule::Database>();
+  active_conflicts = std::make_shared<ConflictRecord>(database);
 }
 
 //==============================================================================
 void ScheduleNode::start_services()
 {
-  //Attempt to load/create participant registry.
-  declare_parameter<std::string>("log_file_location", ".rmf_schedule_node.yaml");
+  RCLCPP_WARN(
+    get_logger(),
+    node_type_str + "Starting services");
+  // Attempt to load/create participant registry.
   std::string log_file_name;
   get_parameter_or<std::string>(
     "log_file_location", 
@@ -254,6 +346,19 @@ void ScheduleNode::start_services()
       e.what());
     throw e;
   }
+
+  test_reconnect_service = create_service<TestReconnect>(
+    "/rmf_traffic/test_reconnect",
+    [this](const std::shared_ptr<rmw_request_id_t> header,
+    const TestReconnect::Request::SharedPtr request,
+    const TestReconnect::Response::SharedPtr response)
+    {
+      RCLCPP_WARN(
+        get_logger(),
+        node_type_str + "Received request to double %d",
+        request->value);
+      response->doubled = request->value * 2;
+    });
 
   // TODO(MXG): As soon as possible, all of these services should be made
   // multi-threaded so they can be parallel processed.
@@ -465,7 +570,7 @@ void ScheduleNode::start_services()
         for (const auto& conflict : conflicts)
         {
           std::unique_lock<std::mutex> lock(active_conflicts_mutex);
-          const auto new_negotiation = active_conflicts.insert(conflict);
+          const auto new_negotiation = active_conflicts->insert(conflict);
 
           if (new_negotiation)
             new_negotiations[new_negotiation->first] = new_negotiation->second;
@@ -806,7 +911,7 @@ void ScheduleNode::itinerary_set(const ItinerarySet& set)
   publish_inconsistencies(set.participant);
 
   std::lock_guard<std::mutex> lock2(active_conflicts_mutex);
-  active_conflicts.check(set.participant, set.itinerary_version);
+  active_conflicts->check(set.participant, set.itinerary_version);
   update_mirrors();
 }
 
@@ -822,7 +927,7 @@ void ScheduleNode::itinerary_extend(const ItineraryExtend& extend)
   publish_inconsistencies(extend.participant);
 
   std::lock_guard<std::mutex> lock2(active_conflicts_mutex);
-  active_conflicts.check(
+  active_conflicts->check(
     extend.participant, database->itinerary_version(extend.participant));
   update_mirrors();
 }
@@ -839,7 +944,7 @@ void ScheduleNode::itinerary_delay(const ItineraryDelay& delay)
   publish_inconsistencies(delay.participant);
 
   std::lock_guard<std::mutex> lock2(active_conflicts_mutex);
-  active_conflicts.check(
+  active_conflicts->check(
     delay.participant, database->itinerary_version(delay.participant));
   update_mirrors();
 }
@@ -857,7 +962,7 @@ void ScheduleNode::itinerary_erase(const ItineraryErase& erase)
   publish_inconsistencies(erase.participant);
 
   std::lock_guard<std::mutex> lock2(active_conflicts_mutex);
-  active_conflicts.check(
+  active_conflicts->check(
     erase.participant, database->itinerary_version(erase.participant));
   update_mirrors();
 }
@@ -871,7 +976,7 @@ void ScheduleNode::itinerary_clear(const ItineraryClear& clear)
   publish_inconsistencies(clear.participant);
 
   std::lock_guard<std::mutex> lock2(active_conflicts_mutex);
-  active_conflicts.check(
+  active_conflicts->check(
     clear.participant, database->itinerary_version(clear.participant));
   update_mirrors();
 }
@@ -985,17 +1090,17 @@ void ScheduleNode::receive_conclusion_ack(const ConflictAck& msg)
   {
     if (ack.updating)
     {
-      active_conflicts.acknowledge(
+      active_conflicts->acknowledge(
         msg.conflict_version, ack.participant, ack.itinerary_version);
     }
     else
     {
-      active_conflicts.acknowledge(
+      active_conflicts->acknowledge(
         msg.conflict_version, ack.participant, rmf_utils::nullopt);
     }
   }
 
-//  print_conclusion(active_conflicts._waiting);
+//  print_conclusion(active_conflicts->_waiting);
 }
 
 //==============================================================================
@@ -1003,7 +1108,7 @@ void ScheduleNode::receive_refusal(const ConflictRefusal& msg)
 {
   std::unique_lock<std::mutex> lock(active_conflicts_mutex);
   auto* negotiation_room =
-    active_conflicts.negotiation(msg.conflict_version);
+    active_conflicts->negotiation(msg.conflict_version);
 
   if (!negotiation_room)
     return;
@@ -1012,7 +1117,7 @@ void ScheduleNode::receive_refusal(const ConflictRefusal& msg)
     + std::to_string(msg.conflict_version) + "]";
   RCLCPP_INFO(get_logger(), output);
 
-  active_conflicts.refuse(msg.conflict_version);
+  active_conflicts->refuse(msg.conflict_version);
 
   ConflictConclusion conclusion;
   conclusion.conflict_version = msg.conflict_version;
@@ -1025,7 +1130,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
 {
   std::unique_lock<std::mutex> lock(active_conflicts_mutex);
   auto* negotiation_room =
-    active_conflicts.negotiation(msg.conflict_version);
+    active_conflicts->negotiation(msg.conflict_version);
 
   if (!negotiation_room)
     return;
@@ -1069,7 +1174,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
       negotiation.evaluate(rmf_traffic::schedule::QuickestFinishEvaluator());
     assert(choose);
 
-    active_conflicts.conclude(msg.conflict_version);
+    active_conflicts->conclude(msg.conflict_version);
 
     ConflictConclusion conclusion;
     conclusion.conflict_version = msg.conflict_version;
@@ -1085,7 +1190,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
     RCLCPP_INFO(get_logger(), output);
 
     conflict_conclusion_pub->publish(std::move(conclusion));
-//    print_conclusion(active_conflicts._waiting);
+//    print_conclusion(active_conflicts->_waiting);
   }
   else if (negotiation.complete())
   {
@@ -1093,7 +1198,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
       + std::to_string(msg.conflict_version) + "]";
     RCLCPP_INFO(get_logger(), output);
 
-    active_conflicts.conclude(msg.conflict_version);
+    active_conflicts->conclude(msg.conflict_version);
 
     // This implies a complete failure
     ConflictConclusion conclusion;
@@ -1101,7 +1206,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
     conclusion.resolved = false;
 
     conflict_conclusion_pub->publish(conclusion);
-//    print_conclusion(active_conflicts._waiting);
+//    print_conclusion(active_conflicts->_waiting);
   }
 }
 
@@ -1109,7 +1214,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
 void ScheduleNode::receive_rejection(const ConflictRejection& msg)
 {
   std::unique_lock<std::mutex> lock(active_conflicts_mutex);
-  auto* negotiation_room = active_conflicts.negotiation(msg.conflict_version);
+  auto* negotiation_room = active_conflicts->negotiation(msg.conflict_version);
 
   if (!negotiation_room)
     return;
@@ -1152,7 +1257,7 @@ void ScheduleNode::receive_rejection(const ConflictRejection& msg)
 void ScheduleNode::receive_forfeit(const ConflictForfeit& msg)
 {
   std::unique_lock<std::mutex> lock(active_conflicts_mutex);
-  auto* negotiation_room = active_conflicts.negotiation(msg.conflict_version);
+  auto* negotiation_room = active_conflicts->negotiation(msg.conflict_version);
 
   if (!negotiation_room)
     return;
@@ -1191,14 +1296,14 @@ void ScheduleNode::receive_forfeit(const ConflictForfeit& msg)
       + std::to_string(msg.conflict_version) + "]";
     RCLCPP_INFO(get_logger(), output);
 
-    active_conflicts.conclude(msg.conflict_version);
+    active_conflicts->conclude(msg.conflict_version);
 
     ConflictConclusion conclusion;
     conclusion.conflict_version = msg.conflict_version;
     conclusion.resolved = false;
 
     conflict_conclusion_pub->publish(conclusion);
-//    print_conclusion(active_conflicts._waiting);
+//    print_conclusion(active_conflicts->_waiting);
   }
 }
 

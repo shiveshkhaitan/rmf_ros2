@@ -70,6 +70,8 @@ const std::string BlockadeSetTopicName = Prefix +
 
 const std::string EmergencyTopicName = "fire_alarm_trigger";
 
+const std::string FailOverEventTopicName = Prefix + "fail_over_event";
+
 } // namespace rmf_traffic_ros2
 
 #endif // RMF_TRAFFIC_ROS2__STANDARDNAMES_HPP

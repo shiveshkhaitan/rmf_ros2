@@ -26,6 +26,7 @@
 #include <rmf_traffic_msgs/msg/participant.hpp>
 #include <rmf_traffic_msgs/msg/participants.hpp>
 #include <rmf_traffic_msgs/msg/request_changes.hpp>
+#include <rmf_traffic_msgs/msg/fail_over_event.hpp>
 
 #include <rmf_traffic_msgs/srv/register_query.hpp>
 #include <rmf_traffic_msgs/srv/unregister_query.hpp>
@@ -48,6 +49,9 @@ using RequestChangesPub = rclcpp::Publisher<RequestChanges>::SharedPtr;
 using UnregisterQuery = rmf_traffic_msgs::srv::UnregisterQuery;
 using UnregisterQueryClient = rclcpp::Client<UnregisterQuery>::SharedPtr;
 
+using FailOverEvent = rmf_traffic_msgs::msg::FailOverEvent;
+using FailOverEventSub = rclcpp::Subscription<FailOverEvent>::SharedPtr;
+
 
 //==============================================================================
 class MirrorManager::Implementation
@@ -60,6 +64,7 @@ public:
   MirrorUpdateSub mirror_update_sub;
   ParticipantsInfoSub participants_info_sub;
   RequestChangesPub request_changes_pub;
+  FailOverEventSub fail_over_event_sub;
   uint64_t query_id = 0;
 
   std::shared_ptr<rmf_traffic::schedule::Mirror> mirror;
@@ -98,6 +103,14 @@ public:
     request_changes_pub = node.create_publisher<RequestChanges>(
       rmf_traffic_ros2::RequestChangesTopicName,
       rclcpp::SystemDefaultsQoS());
+
+    fail_over_event_sub = node.create_subscription<FailOverEvent>(
+      FailOverEventTopicName,
+      rclcpp::SystemDefaultsQoS(),
+      [&]([[maybe_unused]] const FailOverEvent::SharedPtr msg)
+      {
+        handle_schedule_node_fail_over_event();
+      });
   }
 
   void handle_participants_info(const ParticipantsInfo::SharedPtr msg)
@@ -187,6 +200,13 @@ public:
     msg.query_id = query_id;
     unregister_query_client->async_send_request(
       std::make_shared<UnregisterQuery::Request>(std::move(msg)));
+  }
+
+  void handle_schedule_node_fail_over_event()
+  {
+    RCLCPP_WARN(
+      node.get_logger(),
+      "Handling fail over event from schedule node");
   }
 
   template<typename... Args>
