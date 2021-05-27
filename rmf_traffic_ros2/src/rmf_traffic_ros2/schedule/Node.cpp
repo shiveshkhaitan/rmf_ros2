@@ -90,29 +90,30 @@ ScheduleNode::ScheduleNode(const rclcpp::NodeOptions& options)
   active_conflicts(database)
 {
   //Attempt to load/create participant registry.
-  declare_parameter<std::string>("log_file_location", ".rmf_schedule_node.yaml");
+  declare_parameter<std::string>("log_file_location",
+    ".rmf_schedule_node.yaml");
   std::string log_file_name;
   get_parameter_or<std::string>(
-    "log_file_location", 
-    log_file_name, 
+    "log_file_location",
+    log_file_name,
     ".rmf_schedule_node.yaml");
 
   try
   {
     auto participant_logger = std::make_unique<YamlLogger>(log_file_name);
 
-    participant_registry = 
+    participant_registry =
       std::make_shared<ParticipantRegistry>(
-        std::move(participant_logger),
-        database);
+      std::move(participant_logger),
+      database);
 
-    RCLCPP_INFO(get_logger(), 
+    RCLCPP_INFO(get_logger(),
       "Successfully loaded logfile %s ",
       log_file_name.c_str());
   }
-  catch(std::runtime_error& e)
+  catch (std::runtime_error& e)
   {
-    RCLCPP_FATAL(get_logger(), 
+    RCLCPP_FATAL(get_logger(),
       "Failed to correctly load participant registry: %s\n",
       e.what());
     throw e;
@@ -281,8 +282,8 @@ ScheduleNode::ScheduleNode(const rclcpp::NodeOptions& options)
           });
 
           if ( (database->latest_version() == last_checked_version
-            && last_known_participants_version == current_participants_version)
-            || conflict_check_quit)
+          && last_known_participants_version == current_participants_version)
+          || conflict_check_quit)
           {
             // This is a casual wakeup to check if we're supposed to quit yet
             continue;
@@ -488,7 +489,7 @@ void ScheduleNode::unregister_query(
   const auto query_topic = mirror_update_topics.find(request->query_id);
   if (query_topic != mirror_update_topics.end())
   {
-    auto [ pub, update_version, mirror_count ] = query_topic->second;
+    auto [pub, update_version, mirror_count] = query_topic->second;
     // If the topic will have no mirrors registered after this one goes away
     // then remove the publisher and the query.
     if (mirror_count <= 1)
@@ -535,17 +536,17 @@ void ScheduleNode::register_participant(
   try
   {
     const auto registration = participant_registry
-        ->add_or_retrieve_participant(
-          rmf_traffic_ros2::convert(request->description));
+      ->add_or_retrieve_participant(
+      rmf_traffic_ros2::convert(request->description));
 
     using Response = rmf_traffic_msgs::srv::RegisterParticipant::Response;
 
     *response =
       rmf_traffic_msgs::build<Response>()
-        .participant_id(registration.id())
-        .last_itinerary_version(registration.last_itinerary_version())
-        .last_route_id(registration.last_route_id())
-        .error("");
+      .participant_id(registration.id())
+      .last_itinerary_version(registration.last_itinerary_version())
+      .last_route_id(registration.last_route_id())
+      .error("");
 
     RCLCPP_INFO(
       get_logger(),
@@ -921,7 +922,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
     error += "]";
 
     RCLCPP_WARN(get_logger(), error);
-    negotiation_room->cached_proposals.push_back(msg);
+    negotiation_room->cached_proposals.push_back(convert(msg));
     return;
   }
 
@@ -929,7 +930,7 @@ void ScheduleNode::receive_proposal(const ConflictProposal& msg)
   negotiation_room->check_cache({});
 
   // TODO(MXG): This should be removed once we have a negotiation visualizer
-  rmf_traffic_ros2::schedule::print_negotiation_status(msg.conflict_version,
+  rmf_traffic::schedule::print_negotiation_status(msg.conflict_version,
     negotiation);
 
   if (negotiation.ready())
@@ -1002,7 +1003,7 @@ void ScheduleNode::receive_rejection(const ConflictRejection& msg)
     error += "]";
 
     RCLCPP_WARN(get_logger(), error);
-    negotiation_room->cached_rejections.push_back(msg);
+    negotiation_room->cached_rejections.push_back(convert(msg));
     return;
   }
 
@@ -1015,7 +1016,7 @@ void ScheduleNode::receive_rejection(const ConflictRejection& msg)
 
 
   // TODO(MXG): This should be removed once we have a negotiation visualizer
-  rmf_traffic_ros2::schedule::print_negotiation_status(msg.conflict_version,
+  rmf_traffic::schedule::print_negotiation_status(msg.conflict_version,
     negotiation);
 }
 
@@ -1045,7 +1046,7 @@ void ScheduleNode::receive_forfeit(const ConflictForfeit& msg)
     error += "]";
 
     RCLCPP_WARN(get_logger(), error);
-    negotiation_room->cached_forfeits.push_back(msg);
+    negotiation_room->cached_forfeits.push_back(convert(msg));
     return;
   }
 
@@ -1053,7 +1054,7 @@ void ScheduleNode::receive_forfeit(const ConflictForfeit& msg)
   negotiation_room->check_cache({});
 
   // TODO(MXG): This should be removed once we have a negotiation visualizer
-  rmf_traffic_ros2::schedule::print_negotiation_status(msg.conflict_version,
+  rmf_traffic::schedule::print_negotiation_status(msg.conflict_version,
     negotiation);
 
   if (negotiation.complete())

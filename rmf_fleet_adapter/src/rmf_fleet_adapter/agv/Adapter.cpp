@@ -35,7 +35,7 @@ namespace rmf_fleet_adapter {
 namespace agv {
 
 //==============================================================================
-class WorkerWrapper : public rmf_traffic_ros2::schedule::Negotiation::Worker
+class WorkerWrapper : public rmf_traffic::schedule::NegotiationRoom::Worker
 {
 public:
 

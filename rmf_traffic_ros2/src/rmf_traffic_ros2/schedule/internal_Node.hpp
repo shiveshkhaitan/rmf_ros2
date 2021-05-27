@@ -18,10 +18,11 @@
 #ifndef SRC__RMF_TRAFFIC_SCHEDULE__SCHEDULENODE_HPP
 #define SRC__RMF_TRAFFIC_SCHEDULE__SCHEDULENODE_HPP
 
-#include "NegotiationRoom.hpp"
+#include "rmf_traffic_ros2/schedule/Negotiation.hpp"
 
 #include <rmf_traffic/schedule/Database.hpp>
 #include <rmf_traffic/schedule/Negotiation.hpp>
+#include <rmf_traffic/schedule/NegotiationRoom.hpp>
 
 #include <rclcpp/node.hpp>
 
@@ -228,7 +229,7 @@ public:
   {
   public:
 
-    using NegotiationRoom = rmf_traffic_ros2::schedule::NegotiationRoom;
+    using NegotiationRoom = rmf_traffic::schedule::NegotiationRoomInternal;
     using Entry = std::pair<Version, const Negotiation*>;
     struct Wait
     {
@@ -341,7 +342,7 @@ public:
         return;
 
       const auto& participants =
-          negotiation_it->second->negotiation.participants();
+        negotiation_it->second->negotiation.participants();
 
       for (const auto p : participants)
         _version.erase(p);

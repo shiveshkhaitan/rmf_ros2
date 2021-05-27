@@ -20,13 +20,83 @@
 
 #include <rclcpp/node.hpp>
 
-#include <rmf_traffic/schedule/Negotiator.hpp>
-#include <rmf_traffic/schedule/Participant.hpp>
-#include <rmf_traffic/schedule/Snapshot.hpp>
+#include <rmf_traffic/schedule/NegotiationRoom.hpp>
 
-#include <rmf_utils/impl_ptr.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_ack.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_repeat.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_notice.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_refusal.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_forfeit.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_proposal.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_rejection.hpp>
+#include <rmf_traffic_msgs/msg/negotiation_conclusion.hpp>
 
 namespace rmf_traffic_ros2 {
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationForfeit convert(
+  const rmf_traffic::schedule::NegotiationRoom::Forfeit& from);
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationKey convert(
+  const rmf_traffic::schedule::NegotiationRoom::Key& from);
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationRejection convert(
+  const rmf_traffic::schedule::NegotiationRoom::Rejection& from);
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationProposal convert(
+  const rmf_traffic::schedule::NegotiationRoom::Proposal& from);
+
+//==============================================================================
+std::vector<rmf_traffic_msgs::msg::NegotiationKey> convert(
+  const std::vector<rmf_traffic::schedule::NegotiationRoom::Key>& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Conclusion convert(
+  const rmf_traffic_msgs::msg::NegotiationConclusion& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Key convert(
+  const rmf_traffic_msgs::msg::NegotiationKey& from);
+
+//==============================================================================
+rmf_traffic::schedule::Negotiation::VersionedKeySequence convert(
+  const std::vector<rmf_traffic_msgs::msg::NegotiationKey>& from);
+
+//==============================================================================
+std::vector<rmf_traffic_msgs::msg::NegotiationKey> convert(
+  const rmf_traffic::schedule::Negotiation::VersionedKeySequence& from);
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationRefusal convert(
+  const rmf_traffic::schedule::NegotiationRoom::Refusal& from);
+
+//==============================================================================
+rmf_traffic_msgs::msg::NegotiationAck convert(
+  const rmf_traffic::schedule::NegotiationRoom::Ack& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Repeat convert(
+  const rmf_traffic_msgs::msg::NegotiationRepeat& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Notice convert(
+  const rmf_traffic_msgs::msg::NegotiationNotice& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Proposal convert(
+  const rmf_traffic_msgs::msg::NegotiationProposal& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Rejection convert(
+  const rmf_traffic_msgs::msg::NegotiationRejection& from);
+
+//==============================================================================
+rmf_traffic::schedule::NegotiationRoom::Forfeit convert(
+  const rmf_traffic_msgs::msg::NegotiationForfeit& from);
+
 namespace schedule {
 
 //==============================================================================
@@ -34,19 +104,6 @@ namespace schedule {
 class Negotiation
 {
 public:
-
-  /// The Worker class can be used to make the Negotiation asynchronous.
-  class Worker
-  {
-  public:
-
-    /// Tell the worker to add a callback to its schedule. It is imperative that
-    /// this function is thread-safe.
-    virtual void schedule(std::function<void()> job) = 0;
-
-    virtual ~Worker() = default;
-  };
-
   /// Constructor
   ///
   /// \param[in] worker
@@ -57,7 +114,7 @@ public:
   Negotiation(
     rclcpp::Node& node,
     std::shared_ptr<const rmf_traffic::schedule::Snappable> viewer,
-    std::shared_ptr<Worker> worker = nullptr);
+    std::shared_ptr<rmf_traffic::schedule::NegotiationRoom::Worker> worker = nullptr);
 
   /// Set the timeout duration for negotiators. If a negotiator does not respond
   /// within this time limit, then the negotiation will automatically be
